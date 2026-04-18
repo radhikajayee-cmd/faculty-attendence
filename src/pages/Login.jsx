@@ -8,7 +8,7 @@ export default function Login() {
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
-  const [isSignUp, setIsSignUp] = useState(true); // Default to Sign Up for new users
+  const [isSignUp, setIsSignUp] = useState(false); // Default to Login for returning users
   const { user, userRole, login, signUp, loginWithGoogle } = useAuth();
   const navigate = useNavigate();
 
@@ -25,6 +25,11 @@ export default function Login() {
 
   const handleSubmit = async (e) => {
     e.preventDefault();
+    if (!navigator.onLine) {
+      setError('No internet connection. Please connect to the network and try again.');
+      return;
+    }
+
     try {
       setError('');
       setLoading(true);
@@ -34,32 +39,24 @@ export default function Login() {
         await login(email, password);
       }
     } catch (err) {
-      if (err.code === 'auth/user-not-found' || err.code === 'auth/invalid-credential') {
-        // FOOLPROOF FEATURE: If they tried to login but don't exist, just create the account immediately.
-        try {
-            console.log("User not found on login. Auto-creating account instead...");
-            await signUp(email, password);
-            return; // Success!
-        } catch (signupErr) {
-            setError(signupErr.message || 'Authentication failed. Please check password length (min 6 chars).');
-        }
-      } else if (err.code === 'auth/email-already-in-use') {
-        // If they tried to sign up but exist, just log them in immediately.
-        try {
-            console.log("User exists on signup. Auto-logging in instead...");
-            await login(email, password);
-            return; // Success!
-        } catch (loginErr) {
-             setError('Incorrect password. Please try again.');
-        }
+      if (isSignUp && err.code === 'auth/email-already-in-use') {
+        setError('This email is already registered. Please switch to Login.');
+      } else if (!isSignUp && err.code === 'auth/user-not-found') {
+        setError('No account found for this email. Please sign up first.');
       } else if (err.code === 'auth/weak-password') {
         setError('Password must be at least 6 characters long.');
       } else if (err.code === 'auth/wrong-password') {
         setError('Incorrect password. Please try again.');
+      } else if (err.code === 'auth/invalid-credential') {
+        setError('Invalid credentials for this email/password login. If this account was created with Google, please use Google sign-in.');
+      } else if (err.code === 'auth/account-exists-with-different-credential') {
+        setError('This email is registered with Google sign-in. Please click Sign in with Google.');
+      } else if (err.code === 'auth/network-request-failed') {
+        setError('Network error while signing in. Check your internet connection and try again.');
       } else {
         setError(err.message || 'Authentication failed.');
       }
-      console.error("Auth Error:", err);
+      console.error('Auth Error:', err);
     } finally {
       setLoading(false);
     }
@@ -71,7 +68,13 @@ export default function Login() {
       setLoading(true);
       await loginWithGoogle();
     } catch (err) {
-      setError('Failed to sign in with Google.');
+      if (err.code === 'auth/account-exists-with-different-credential') {
+        setError('This email is already registered with email/password. Please sign in with email instead.');
+      } else if (err.code === 'auth/popup-closed-by-user') {
+        setError('Google sign-in was cancelled. Please try again.');
+      } else {
+        setError(err.message || 'Failed to sign in with Google.');
+      }
       console.error(err);
     } finally {
       setLoading(false);

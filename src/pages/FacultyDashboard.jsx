@@ -80,23 +80,21 @@ export default function FacultyDashboard() {
             sTotal++;
             if (d.status === 'Present') sOnTime++;
             if (d.status === 'Late') sLate++;
-
-            // Checks for Today's record
-            if (d.dateString === todayDateString) {
-                todayData = d;
-            }
         });
 
-        // 1. Set Today's State
-        if (todayData) {
-            setAttendanceState(todayData.checkoutTime ? 'checked-out' : 'checked-in');
+        // 1. Sort trailing logs manually (to avoid orderBy index request)
+        fetchedLogs.sort((a, b) => b.timestamp - a.timestamp);
+
+        // 2. Find the most recent log for today
+        const latestTodayLog = fetchedLogs.find(log => log.dateString === todayDateString);
+
+        if (latestTodayLog) {
+            // Keep 'checked-out' state so the UI can show the Shift Completed badge
+            setAttendanceState(latestTodayLog.checkoutTime ? 'checked-out' : 'checked-in');
         } else {
             setAttendanceState(null);
         }
 
-        // 2. Sort trailing logs manually (to avoid orderBy index request)
-        fetchedLogs.sort((a, b) => b.timestamp - a.timestamp);
-        
         // 3. Take top 7 for recent display
         setRecentLogs(fetchedLogs.slice(0, 7));
         setStats({ total: sTotal, onTime: sOnTime, late: sLate });
@@ -109,18 +107,22 @@ export default function FacultyDashboard() {
     }
   };
 
-  const getStatusBasedOnTime = () => {
-      const now = new Date();
-      const deadline = new Date();
-      deadline.setHours(9, 30, 0); 
-      return now > deadline ? 'Late' : 'Present';
-  };
+
 
   const markAttendance = async (type) => {
     try {
         setLoading(true);
-        const nowTime = new Date().toLocaleTimeString();
-        
+        const now = new Date();
+        const nowTime = now.toLocaleTimeString();
+        const hours = now.getHours();
+
+        // Prevent invalid check-ins/check-outs outside of normal working hours (e.g. 6 AM to 9 PM)
+        if (hours < 6 || hours >= 21) {
+            alert("Attendance can only be marked during official working hours (6:00 AM - 9:00 PM).");
+            setLoading(false);
+            return;
+        }
+
         const record = {
             userId: user.uid,
             email: user.email || 'No Email',
@@ -131,7 +133,111 @@ export default function FacultyDashboard() {
 
         if (type === 'checkin') {
             record.checkinTime = nowTime;
-            record.status = getStatusBasedOnTime();
+            
+            const deadline = new Date();
+            deadline.setHours(10, 0, 0, 0);
+            
+            const maxLate = new Date();
+            maxLate.setHours(10, 15, 0, 0);
+
+            let currentStatus = 'Present';
+            let minutesLate = 0;
+            let lateMessageForAlert = '';
+
+            if (now > deadline) {
+                minutesLate = Math.ceil((now - deadline) / (1000 * 60));
+                
+                let lateTimeStr = "";
+                const hoursLate = Math.floor(minutesLate / 60);
+                const remainingMinutes = minutesLate % 60;
+                if (hoursLate > 0) {
+                    lateTimeStr = `${hoursLate} hour${hoursLate > 1 ? 's' : ''} and ${remainingMinutes} minute${remainingMinutes !== 1 ? 's' : ''}`;
+                } else {
+                    lateTimeStr = `${minutesLate} minute${minutesLate !== 1 ? 's' : ''}`;
+                }
+                
+                if (now > maxLate) {
+                    alert(`You are late by ${lateTimeStr}. Extending 15 minutes of late arrival is not permitted. You cannot check in today.`);
+                    setLoading(false);
+                    return;
+                } else {
+                    currentStatus = 'Late';
+                    lateMessageForAlert = `You have arrived late by ${lateTimeStr}.`;
+                }
+
+                // Show Popup
+                alert(lateMessageForAlert);
+                
+                if (isOnline) {
+                    try {
+                        const attRef = collection(db, 'attendance');
+                        const qPast = query(attRef, where('userId', '==', user.uid));
+                        const pastSnap = await getDocs(qPast);
+                        
+                        let allRecords = [];
+                        pastSnap.forEach(doc => {
+                            const data = doc.data();
+                            if (data.dateString !== todayDateString) {
+                                allRecords.push(data);
+                            }
+                        });
+                        
+                        allRecords.sort((a, b) => b.timestamp - a.timestamp);
+                        const previousRecord = allRecords.length > 0 ? allRecords[0] : null;
+
+                        let isConsecutiveLate = false;
+                        if (previousRecord && ['Late', 'Half CL', 'Grace'].includes(previousRecord.status)) {
+                            isConsecutiveLate = true;
+                        }
+
+                        let emailMessage = `Dear Faculty,\n\n${lateMessageForAlert}\n\nPlease try to arrive on time.`;
+                        if (isConsecutiveLate) {
+                            emailMessage += `\n\nWARNING: You have been arriving late continuously. Please note that this is being monitored and the administration has been notified.`;
+                        }
+
+                        // Send Email to Faculty
+                        fetch("https://formsubmit.co/ajax/" + user.email, {
+                            method: "POST",
+                            headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+                            body: JSON.stringify({
+                                _subject: isConsecutiveLate ? `WARNING: Continuous Late Arrival Alert` : `Late Arrival Alert`,
+                                name: "Admin - Faculty Attendance System",
+                                email: user.email,
+                                message: emailMessage
+                            })
+                        }).catch(err => console.error(err));
+                        
+                        // If continuous, send warning to Admin
+                        if (isConsecutiveLate) {
+                            fetch("https://formsubmit.co/ajax/radhikajayee@gmail.com", {
+                                method: "POST",
+                                headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+                                body: JSON.stringify({
+                                    _subject: `Continuous Late Alert: ${user.email}`,
+                                    name: "Faculty Attendance System",
+                                    email: user.email,
+                                    message: `Faculty member (${user.email}) is late again today by ${lateTimeStr}.\n\nThey are repeating this continuously (their previous check-in was also marked as late).\nToday's Status: ${currentStatus}`
+                                })
+                            }).catch(err => console.error(err));
+                        } else if (currentStatus === 'Half CL') {
+                            fetch("https://formsubmit.co/ajax/radhikajayee@gmail.com", {
+                                method: "POST",
+                                headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+                                body: JSON.stringify({
+                                    _subject: `Faculty Half CL Alert: ${user.email}`,
+                                    name: "Faculty Attendance System",
+                                    email: user.email,
+                                    message: `Faculty member (${user.email}) arrived late by ${lateTimeStr} (>15m limit).\n\nTheir attendance for today has been automatically marked as Half CL.`
+                                })
+                            }).catch(err => console.error(err));
+                        }
+                    } catch (err) {
+                        console.error("Error checking continuous late:", err);
+                    }
+                }
+            }
+            
+            record.status = currentStatus;
         } else {
             record.checkoutTime = nowTime;
         }
@@ -146,14 +252,59 @@ export default function FacultyDashboard() {
             if (type === 'checkin') {
                 await addDoc(attendanceRef, { ...record, serverTime: serverTimestamp() });
                 setAttendanceState('checked-in');
+
+                // Send real-time email notification to Admin for Check-in
+                fetch("https://formsubmit.co/ajax/radhikajayee@gmail.com", {
+                    method: "POST",
+                    headers: { 
+                        'Content-Type': 'application/json',
+                        'Accept': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        _subject: `Faculty Check-In Alert: ${user.email}`,
+                        name: "Faculty Attendance System",
+                        email: user.email,
+                        message: `Faculty member (${user.email}) checked in successfully.\n\nDate: ${todayDateString}\nTime: ${nowTime}\nStatus: ${record.status}`
+                    })
+                }).catch(err => console.error("Failed to send email notification:", err));
+
             } else {
                 // Use the local state to find today's check-in ID instantly
                 const todayLog = recentLogs.find(log => log.dateString === todayDateString);
                 
                 if (todayLog && todayLog.id) {
                     const docRef = doc(db, 'attendance', todayLog.id);
-                    await updateDoc(docRef, { checkoutTime: nowTime, serverTime: serverTimestamp() });
+                    
+                    const updateData = { checkoutTime: nowTime, serverTime: serverTimestamp() };
+                    
+                    const fivePM = new Date();
+                    fivePM.setHours(17, 0, 0, 0);
+
+                    // Check-out Rules
+                    if (now > fivePM) {
+                        alert("You are attempting to check out after 5:00 PM. Check-out is not permitted after this time.");
+                        setLoading(false);
+                        return;
+                    }
+
+                    await updateDoc(docRef, updateData);
                     setAttendanceState('checked-out');
+                    
+                    // Send real-time email notification to Admin for Checkout
+                    fetch("https://formsubmit.co/ajax/radhikajayee@gmail.com", {
+                        method: "POST",
+                        headers: { 
+                            'Content-Type': 'application/json',
+                            'Accept': 'application/json'
+                        },
+                        body: JSON.stringify({
+                            _subject: `Faculty Check-Out Alert: ${user.email}`,
+                            name: "Faculty Attendance System",
+                            email: user.email,
+                            message: `Faculty member (${user.email}) checked out successfully.\n\nDate: ${todayDateString}\nCheck-Out Time: ${nowTime}`
+                        })
+                    }).catch(err => console.error("Failed to send checkout email notification:", err));
+
                 } else {
                     alert("Could not find today's active check-in record. Have you checked in?");
                     setLoading(false);
@@ -241,12 +392,12 @@ export default function FacultyDashboard() {
                     ) : (
                         <>
                             <button 
-                                disabled={attendanceState !== null}
+                                disabled={attendanceState === 'checked-in'}
                                 onClick={() => markAttendance('checkin')}
                                 className="btn btn-success" 
                                 style={{ padding: '1.25rem', fontSize: '1.2rem', borderRadius: '16px' }}
                             >
-                                <CheckCircle2 size={26} /> {attendanceState ? 'Checked In Successfully' : 'Check In Now'}
+                                <CheckCircle2 size={26} /> {attendanceState === 'checked-in' ? 'Checked In Successfully' : 'Check In Now'}
                             </button>
                             
                             <button 
@@ -289,7 +440,7 @@ export default function FacultyDashboard() {
                                     <td>{log.checkinTime || '--:--'}</td>
                                     <td>{log.checkoutTime || '--:--'}</td>
                                     <td>
-                                        <span className={`status-badge status-${log.status?.toLowerCase() || 'present'}`}>
+                                        <span className={`status-badge status-${log.status?.toLowerCase().replace(/\s+/g, '-') || 'present'}`}>
                                             {log.status}
                                         </span>
                                     </td>

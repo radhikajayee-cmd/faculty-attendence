@@ -1,6 +1,16 @@
 import { createContext, useContext, useEffect, useState } from 'react';
 import { auth, db } from '../firebase/firebaseConfig';
-import { onAuthStateChanged, signInWithEmailAndPassword, signOut, GoogleAuthProvider, signInWithPopup, createUserWithEmailAndPassword } from 'firebase/auth';
+import {
+    onAuthStateChanged,
+    signInWithEmailAndPassword,
+    signOut,
+    GoogleAuthProvider,
+    signInWithPopup,
+    createUserWithEmailAndPassword,
+    setPersistence,
+    browserLocalPersistence,
+    fetchSignInMethodsForEmail
+} from 'firebase/auth';
 import { doc, getDoc, setDoc } from 'firebase/firestore';
 
 const AuthContext = createContext();
@@ -49,12 +59,39 @@ export const AuthProvider = ({ children }) => {
         return unsubscribe;
     }, []);
 
-    const login = (email, password) => {
-        return signInWithEmailAndPassword(auth, email, password);
+    const ensurePersistence = async () => {
+        try {
+            await setPersistence(auth, browserLocalPersistence);
+        } catch (err) {
+            console.warn('Unable to set auth persistence, continuing with default:', err);
+        }
+    };
+
+    const getSignInMethods = async (email) => {
+        try {
+            return await fetchSignInMethodsForEmail(auth, email);
+        } catch (err) {
+            console.warn('Unable to fetch sign-in methods:', err);
+            return [];
+        }
+    };
+
+    const login = async (email, password) => {
+        await ensurePersistence();
+        try {
+            return await signInWithEmailAndPassword(auth, email, password);
+        } catch (err) {
+            const methods = await getSignInMethods(email);
+            if (methods.includes('google.com')) {
+                throw { code: 'auth/account-exists-with-different-credential', message: 'This email is registered with Google sign-in. Please choose Sign in with Google.' };
+            }
+            throw err;
+        }
     };
 
     const signUp = async (email, password) => {
         console.log("Initiating sign up...");
+        await ensurePersistence();
         const result = await createUserWithEmailAndPassword(auth, email, password);
         const currentUser = result.user;
         
@@ -77,6 +114,7 @@ export const AuthProvider = ({ children }) => {
 
     const loginWithGoogle = async () => {
         console.log("Initiating Google Sign-In...");
+        await ensurePersistence();
         const provider = new GoogleAuthProvider();
         const result = await signInWithPopup(auth, provider);
         const currentUser = result.user;

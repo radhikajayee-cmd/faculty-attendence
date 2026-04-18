@@ -130,7 +130,7 @@ export default function AdminDashboard() {
                                         <td>{record.isAbsent ? '--:--' : (record.checkinTime || '--:--')}</td>
                                         <td>{record.isAbsent ? '--:--' : (record.checkoutTime || '--:--')}</td>
                                         <td>
-                                            <span className={`status-badge status-${record.status?.toLowerCase() || 'present'}`}>
+                                            <span className={`status-badge status-${record.status?.toLowerCase().replace(/\s+/g, '-') || 'present'}`}>
                                                 {record.status}
                                             </span>
                                         </td>
